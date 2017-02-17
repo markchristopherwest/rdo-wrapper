@@ -1,0 +1,172 @@
+---
+- name: rdo-wrapper
+  hosts: AIO
+  sudo: True
+  vars:
+    ansible_ifaces: '{{ ansible_interfaces|sort }}'
+    #interface_tenancy needs to correlate to ip_tenancy see below
+    interface_tenancy: '{{ ansible_ifaces[1] }}'
+    ip_manage: '{{ ansible_default_ipv4.address }}'
+    #ip_tenancy should not be hardcoded i.e.: need to create j2 filter to pull ipv4 of nic2
+    ip_tenancy: "{{ ansible_ens37.ipv4.address }}"
+    openstack_zone: 'nova'
+    openstack_admin_name: 'admin'
+    openstack_admin_password: 'changeme'
+    openstack_keystone: 'http://{{ ansible_default_ipv4.address }}:5000'
+    openstack_neutron_ipv4_start: "{{ ip_tenancy.split('.')[0] }}.{{ ip_tenancy.split('.')[1] }}.{{ ip_tenancy.split('.')[2] }}.1{{ ip_tenancy[-1] }}0"
+    openstack_neutron_ipv4_end: "{{ ip_tenancy.split('.')[0] }}.{{ ip_tenancy.split('.')[1] }}.{{ ip_tenancy.split('.')[2] }}.1{{ ip_tenancy[-1] }}9"
+    openstack_neutron_ipv4_gw: "{{ ip_tenancy.split('.')[0] }}.{{ ip_tenancy.split('.')[1] }}.{{ ip_tenancy.split('.')[2] }}.1"
+    openstack_neutron_ipv4_cidr: "{{ ip_tenancy.split('.')[0] }}.{{ ip_tenancy.split('.')[1] }}.{{ ip_tenancy.split('.')[2] }}.0/24"
+    openstack_neutron_ipv4_dns: "8.8.8.8 8.8.4.4 4.2.2.2 4.2.2.1"
+
+  tasks:
+  - name: 
+    dnf:
+      name: yum
+      state: latest
+    when: ansible_distribution == 'Fedora' and ansible_distribution_major_version > '24'
+
+  - name: YUM install libselinux-python
+    yum: name=libselinux-python state=latest
+
+  - name: download EPEL repo
+    get_url:
+      url: https://dl.fedoraproject.org/pub/epel/7/x86_64/e/epel-release-7-9.noarch.rpm
+      dest: /var/tmp/epel-release-7-9.noarch.rpm
+      mode: 0440
+
+  - name: install EPEL repo
+    yum:
+      name: /var/tmp/epel-release-7-9.noarch.rpm
+      state: present
+
+  - name: download RDO repo
+    get_url:
+      url: https://www.rdoproject.org/repos/rdo-release.rpm
+      dest: /var/tmp/rdo-release.rpm
+      mode: 0440
+    when: ansible_distribution == 'CentOS' or ansible_distribution == 'RHEL'
+
+  - name: install RDO repo
+    yum:
+      name: /var/tmp/rdo-release.rpm
+      state: present
+    when: ansible_distribution == 'CentOS' or ansible_distribution == 'RHEL'
+
+  - name: install openstack repo
+    yum:
+      name: centos-release-openstack-newton
+      state: present
+    when: ansible_distribution == 'CentOS'
+
+  - name: yum install open-vm-tools
+    yum: name=open-vm-tools state=latest
+
+  - name: selinux set
+    selinux: policy=targeted state=permissive
+
+  - name: service Disable firewalld
+    service: name=firewalld enabled=no
+
+  - name: service Stop firewalld
+    service: name=firewalld state=stopped
+
+  - name: service Disable NetworkManager
+    service: name=NetworkManager enabled=no
+
+  - name: service Stop NetworkManager
+    service: name=NetworkManager state=stopped
+
+  - name: yum Install EPEL
+    yum: name=epel-release state=latest
+
+  - name: yum Install CURL
+    yum: name=curl state=latest
+
+  - name: yum Install git
+    yum: name=git state=latest
+
+  - name: yum Install VIM
+    yum: name=vim state=latest
+    when: ansible_distribution == 'CentOS' or ansible_distribution == 'RHEL'
+
+  - name: yum Install TRACEROUTE
+    yum: name=traceroute state=latest
+
+  - name: yum Install TREE
+    yum: name=tree state=latest
+
+  - name: yum Install NET-TOOLS
+    yum: name=net-tools state=latest
+
+  - name: yum Install WGET
+    yum: name=wget state=latest
+
+  - name: Yum Update All
+    yum: name=* state=latest
+
+  - name: yum Install 'openstack-packstack'
+    yum: name=openstack-packstack state=latest
+
+  - name: debug Confirm Interface Names
+    debug: msg="OpenVSwitch will bind to interface {{ interface_tenancy }} with an IP of {{ ip_tenancy }}"
+
+  - name: pause to Confirm 
+    pause: prompt="Ready to launch?" minutes=1
+
+  - name: debug Evaluate PackStack CLI Syntax
+    debug: msg="packstack --allinone --provision-demo=n --ntp-servers=0.us.pool.ntp.org,1.us.pool.ntp.org --os-neutron-ml2-flat-networks=* --os-neutron-ovs-bridge-mappings=extnet:br-{{interface_tenancy}} --os-neutron-ovs-bridge-interfaces=br-{{interface_tenancy}}:{{interface_tenancy}} --os-neutron-ovs-tunnel-if={{interface_tenancy}} --os-heat-install=y"
+
+  - name: pause to Confirm Detail
+    pause: prompt="Is the Packstack CLI correct?" minutes=1
+
+#  - name: command openstack-packstack wrapper 
+#    command: packstack --allinone --provision-demo=n --ntp-servers=0.us.pool.ntp.org,1.us.pool.ntp.org --os-neutron-ml2-flat-networks=* --os-neutron-ovs-bridge-mappings=extnet:br-{{interface_tenancy}} --os-neutron-ovs-bridge-interfaces=br-{{interface_tenancy}}:{{interface_tenancy}} --os-neutron-ovs-tunnel-if={{interface_tenancy}} --os-heat-install=y
+
+  - name: command openstack-packstack wrapper 
+    command: packstack --allinone --provision-demo=y 
+
+  - name: lineinfile make neutron metadata network type_drivers
+    lineinfile: dest=/etc/neutron/plugins/ml2/ml2_conf.ini regexp="^type_drivers" line="type_drivers=vlan,vxlan,flat"
+
+  - name: lineinfile make neutron metadata network bridge_mappings
+    lineinfile: dest=/etc/neutron/plugins/ml2/ml2_conf.ini regexp="^bridge_mappings" line="bridge_mappings={{ iface_tenancy }}"
+
+  - name: command make neutron metadata isolation enable_isolated_metadata
+    command: openstack-config --set /etc/neutron/dhcp_agent.ini DEFAULT enable_isolated_metadata True
+
+  - name: command make neutron metadata network enable_metadata_network
+    command: openstack-config --set /etc/neutron/dhcp_agent.ini DEFAULT enable_metadata_network True
+
+  - name: command make nova metadata_host
+    command: openstack-config --set /etc/nova/nova.conf DEFAULT metadata_host {{ ansible_default_ipv4.address }}
+
+  - name: shell make flat network
+    shell: source /root/keystonerc_admin && neutron net-create external_network --provider:network_type flat --provider:physical_network extnet --router:external --shared
+
+  - name: shell Creating OpenStack Flat Provider Subnet
+    shell: source /root/keystonerc_admin && neutron subnet-create --name external_subnet --enable_dhcp=True --allocation-pool=start={{os_neutron_ipv4_start}},end={{os_neutron_ipv4_end}} --gateway={{os_neutron_ipv4_gw}} external_network {{os_neutron_ipv4_cidr}} --dns-nameservers list=true {{os_neutron_ipv4_dns}}
+
+  - name: shell Admin's password...
+    shell: source /root/keystonerc_admin && keystone user-password-update --pass=changeme admin
+
+  - name: file /root/keystonerc_admin
+    file: path=/root/keystonerc_admin state=touch mode="u=rw,g=r,o=r"
+
+  - name: blockinfile Populate admin's keystonerc_admin...
+    blockinfile:
+      dest: /root/keystonerc_admin
+      marker: "#Provided by Ansible"
+      insertafter: EOF
+      content: |
+        export OS_USERNAME=admin
+        export OS_PASSWORD=changeme
+        export OS_AUTH_URL=http://127.0.0.1:5000/v2.0
+        export PS1='[\u@\h \W(keystone_admin)]$ '
+        export OS_TENANT_NAME=admin
+        export OS_REGION_NAME=RegionOne
+
+  - name: command Restart OpenStack Services
+    command: openstack-service restart
+
+
